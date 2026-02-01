@@ -9,7 +9,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "puppeteer": "^23.9.0",
-    "israeli-bank-scrapers": "^6.5.0",
+    "israeli-bank-scrapers": "^6.7.1",
     "cors": "^2.8.5"
   },
   "engines": {
