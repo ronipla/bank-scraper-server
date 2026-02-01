@@ -70,7 +70,7 @@ app.post('/api/scrape-discount', async (req, res) => {
     const result = await scraper.scrape({
       id,
       password,
-      userCode,
+      num: userCode,
     });
 
     console.log('Scrape completed');
