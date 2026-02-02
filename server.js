@@ -220,6 +220,7 @@ app.post('/api/scrape/:company', async (req, res) => {
     const transactions = [];
     for (const account of result.accounts || []) {
       console.log('Processing account:', account.accountNumber);
+      console.log('Account balance:', account.balance);
       for (const txn of account.txns || []) {
         transactions.push({
           date: txn.date,
