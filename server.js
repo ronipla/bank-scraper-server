@@ -234,6 +234,7 @@ app.post('/api/scrape/:company', async (req, res) => {
           status: txn.status,
           identifier: txn.identifier || null,
           memo: txn.memo || null,
+          reference: txn.memo || txn.identifier || null,
           category: txn.category || null,
           installments: txn.installments || null,
         });
