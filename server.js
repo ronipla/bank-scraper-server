@@ -1,7 +1,25 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { createScraper, CompanyTypes } = require('israeli-bank-scrapers');
+
+puppeteer.use(StealthPlugin());
+
+// Common Chrome user agents for rotation
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+];
+
+function getRandomUserAgent() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -133,45 +151,61 @@ app.get('/api/companies', (req, res) => {
   res.json({ success: true, companies });
 });
 
-// Generic scrape endpoint
-app.post('/api/scrape/:company', async (req, res) => {
-  const { company } = req.params;
-  const { startDate, ...credentials } = req.body;
+// ── Async scrape queue (for webhook callbacks) ──
+const MAX_CONCURRENT_SCRAPES = 3;
+let activeScrapes = 0;
+const scrapeQueue = [];
 
-  console.log(`=== Scrape request received for ${company} ===`);
+function enqueueScrape(job) {
+  scrapeQueue.push(job);
+  processQueue();
+}
 
-  const config = COMPANY_CONFIG[company];
-  if (!config) {
-    console.log('Invalid company:', company);
-    return res.status(400).json({
-      success: false,
-      error: 'INVALID_COMPANY',
-      message: `Company '${company}' is not supported`,
-      supportedCompanies: Object.keys(COMPANY_CONFIG),
+function processQueue() {
+  while (activeScrapes < MAX_CONCURRENT_SCRAPES && scrapeQueue.length > 0) {
+    activeScrapes++;
+    const job = scrapeQueue.shift();
+    performScrapeJob(job).finally(() => {
+      activeScrapes--;
+      processQueue();
     });
   }
+}
 
-  // Validate required fields
-  const missingFields = config.fields.filter((field) => !credentials[field]);
-  if (missingFields.length > 0) {
-    console.log('Missing fields:', missingFields);
-    return res.status(400).json({
-      success: false,
-      error: 'MISSING_CREDENTIALS',
-      message: `Missing required fields: ${missingFields.join(', ')}`,
-      requiredFields: config.fields,
-    });
+async function performScrapeJob({ company, config, credentials, startDate, callbackUrl, callbackToken }) {
+  let result;
+  try {
+    result = await performScrape(company, config, credentials, startDate);
+  } catch (error) {
+    result = { success: false, error: error.message || 'Internal server error' };
   }
 
-  console.log('Company:', config.name);
-  console.log('Fields received:', config.fields.map((f) => `${f}: ${credentials[f]?.length || 0} chars`).join(', '));
+  // POST result to callback URL
+  try {
+    console.log(`Posting callback to ${callbackUrl} ...`);
+    const resp = await fetch(callbackUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(callbackToken ? { Authorization: `Bearer ${callbackToken}` } : {}),
+      },
+      body: JSON.stringify(result),
+    });
+    console.log(`Callback response: ${resp.status}`);
+  } catch (err) {
+    console.error('Callback POST failed:', err.message);
+  }
+}
 
+// Core scrape logic (shared by sync and async paths)
+async function performScrape(company, config, credentials, startDate) {
   let browser;
   try {
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
-    console.log('Using Chromium at:', executablePath);
+    const userAgent = getRandomUserAgent();
+    console.log(`[${company}] Launching browser (UA: ${userAgent.slice(0, 40)}...)`);
 
-    const launchOptions = {
+    browser = await puppeteer.launch({
       headless: true,
       executablePath,
       args: [
@@ -181,15 +215,13 @@ app.post('/api/scrape/:company', async (req, res) => {
         '--disable-gpu',
         '--no-zygote',
         '--single-process',
+        '--disable-blink-features=AutomationControlled',
+        `--user-agent=${userAgent}`,
       ],
-    };
-
-    console.log('Launching browser...');
-    browser = await puppeteer.launch(launchOptions);
-    console.log('Browser launched successfully');
+    });
 
     const scrapeStartDate = new Date(startDate || Date.now() - 180 * 24 * 60 * 60 * 1000);
-    console.log('Scrape start date:', scrapeStartDate.toISOString());
+    console.log(`[${company}] Scrape start date: ${scrapeStartDate.toISOString()}`);
 
     const scraper = createScraper({
       companyId: config.companyId,
@@ -199,28 +231,22 @@ app.post('/api/scrape/:company', async (req, res) => {
       browser,
     });
 
-    console.log('Scraper created, starting scrape...');
     const mappedCredentials = config.mapCredentials(credentials);
     const result = await scraper.scrape(mappedCredentials);
 
-    console.log('Scrape completed');
-    console.log('Success:', result.success);
-    console.log('Error type:', result.errorType || 'none');
-    console.log('Error message:', result.errorMessage || 'none');
+    console.log(`[${company}] Scrape completed — success: ${result.success}`);
 
     if (!result.success) {
-      console.log('Scrape failed with error:', result.errorType);
-      return res.status(400).json({
+      return {
         success: false,
         error: result.errorType || 'SCRAPING_FAILED',
         errorMessage: result.errorMessage || null,
-      });
+      };
     }
 
     const transactions = [];
     for (const account of result.accounts || []) {
-      console.log('Processing account:', account.accountNumber);
-      console.log('Account balance:', account.balance);
+      console.log(`[${company}] Account ${account.accountNumber}: balance ${account.balance}`);
       for (const txn of account.txns || []) {
         transactions.push({
           date: txn.date,
@@ -241,9 +267,9 @@ app.post('/api/scrape/:company', async (req, res) => {
       }
     }
 
-    console.log('Total transactions:', transactions.length);
+    console.log(`[${company}] Total transactions: ${transactions.length}`);
 
-    return res.json({
+    return {
       success: true,
       company: config.name,
       transactions,
@@ -252,22 +278,65 @@ app.post('/api/scrape/:company', async (req, res) => {
         balance: acc.balance,
         txnsCount: acc.txns?.length || 0,
       })) || [],
-    });
+    };
   } catch (error) {
-    console.error('=== Scraper error ===');
-    console.error('Error name:', error.name);
-    console.error('Error message:', error.message);
-    console.error('Error stack:', error.stack);
+    console.error(`[${company}] Scraper error:`, error.message);
+    throw error;
+  } finally {
+    if (browser) {
+      await browser.close();
+      console.log(`[${company}] Browser closed`);
+    }
+  }
+}
+
+// Generic scrape endpoint — supports both sync and async (webhook) modes
+app.post('/api/scrape/:company', async (req, res) => {
+  const { company } = req.params;
+  const { startDate, callbackUrl, callbackToken, ...credentials } = req.body;
+
+  console.log(`=== Scrape request for ${company} (${callbackUrl ? 'async' : 'sync'}) ===`);
+
+  const config = COMPANY_CONFIG[company];
+  if (!config) {
+    return res.status(400).json({
+      success: false,
+      error: 'INVALID_COMPANY',
+      message: `Company '${company}' is not supported`,
+      supportedCompanies: Object.keys(COMPANY_CONFIG),
+    });
+  }
+
+  const missingFields = config.fields.filter((field) => !credentials[field]);
+  if (missingFields.length > 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'MISSING_CREDENTIALS',
+      message: `Missing required fields: ${missingFields.join(', ')}`,
+      requiredFields: config.fields,
+    });
+  }
+
+  // ── Async mode: return 202 immediately, POST results to callbackUrl ──
+  if (callbackUrl) {
+    const jobId = `${company}-${Date.now()}`;
+    console.log(`[${jobId}] Enqueuing async scrape (queue: ${scrapeQueue.length}, active: ${activeScrapes})`);
+    enqueueScrape({ company, config, credentials, startDate, callbackUrl, callbackToken });
+    return res.status(202).json({ accepted: true, jobId });
+  }
+
+  // ── Sync mode: existing behavior ──
+  try {
+    const result = await performScrape(company, config, credentials, startDate);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+    return res.json(result);
+  } catch (error) {
     return res.status(500).json({
       success: false,
       error: error.message || 'Internal server error',
     });
-  } finally {
-    if (browser) {
-      console.log('Closing browser...');
-      await browser.close();
-      console.log('Browser closed');
-    }
   }
 });
 
