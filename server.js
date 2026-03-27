@@ -172,7 +172,7 @@ function processQueue() {
   }
 }
 
-async function performScrapeJob({ company, config, credentials, startDate, callbackUrl, callbackToken }) {
+async function performScrapeJob({ company, config, credentials, startDate, callbackUrl, callbackToken, bankAccountId, orgId }) {
   let result;
   try {
     result = await performScrape(company, config, credentials, startDate);
@@ -189,7 +189,7 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
         'Content-Type': 'application/json',
         ...(callbackToken ? { Authorization: `Bearer ${callbackToken}` } : {}),
       },
-      body: JSON.stringify(result),
+      body: JSON.stringify({ ...result, bankAccountId, orgId }),
     });
     console.log(`Callback response: ${resp.status}`);
   } catch (err) {
@@ -293,7 +293,7 @@ async function performScrape(company, config, credentials, startDate) {
 // Generic scrape endpoint — supports both sync and async (webhook) modes
 app.post('/api/scrape/:company', async (req, res) => {
   const { company } = req.params;
-  const { startDate, callbackUrl, callbackToken, ...credentials } = req.body;
+  const { startDate, callbackUrl, callbackToken, bankAccountId, orgId, ...credentials } = req.body;
 
   console.log(`=== Scrape request for ${company} (${callbackUrl ? 'async' : 'sync'}) ===`);
 
@@ -321,7 +321,7 @@ app.post('/api/scrape/:company', async (req, res) => {
   if (callbackUrl) {
     const jobId = `${company}-${Date.now()}`;
     console.log(`[${jobId}] Enqueuing async scrape (queue: ${scrapeQueue.length}, active: ${activeScrapes})`);
-    enqueueScrape({ company, config, credentials, startDate, callbackUrl, callbackToken });
+    enqueueScrape({ company, config, credentials, startDate, callbackUrl, callbackToken, bankAccountId, orgId });
     return res.status(202).json({ accepted: true, jobId });
   }
 
