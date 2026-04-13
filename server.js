@@ -1,28 +1,52 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { createScraper, CompanyTypes } = require('israeli-bank-scrapers');
 
 puppeteer.use(StealthPlugin());
 
-// Common Chrome user agents for rotation
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+// ── Deterministic fingerprint per org ──
+// Same orgId always gets the same profile — consistent identity like a real user.
+// 3 mainstream profiles only — blend into the crowd, don't stand out.
+const BROWSER_PROFILES = [
+  { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36' },
+  { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36' },
+  { ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36' },
 ];
 
-function getRandomUserAgent() {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+function mulberry32(seed) {
+  return () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function getFingerprintForOrg(orgId) {
+  const seed = parseInt(crypto.createHash('sha256').update(String(orgId)).digest('hex').slice(0, 8), 16);
+  const rng = mulberry32(seed);
+  const profile = BROWSER_PROFILES[Math.floor(rng() * BROWSER_PROFILES.length)];
+  return { ua: profile.ua, timezone: 'Asia/Jerusalem', language: 'he-IL' };
 }
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Credential fields that must never appear in logs or error reports
+const SENSITIVE_KEYS = new Set(['password', 'userCode', 'id', 'card6Digits', 'nationalID', 'apiPassword', 'username', 'num']);
+
+// Returns a shallow copy of obj with sensitive keys replaced — safe to log
+function sanitizeForLog(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = { ...obj };
+  for (const key of SENSITIVE_KEYS) {
+    if (key in out) out[key] = '[REDACTED]';
+  }
+  return out;
+}
 
 app.use(cors());
 app.use(express.json());
@@ -141,6 +165,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Operational metrics — queue depth, active scrapes, uptime
+app.get('/metrics', (req, res) => {
+  res.json({
+    queue: scrapeQueue.length,
+    active: activeScrapes,
+    uptime: process.uptime(),
+  });
+});
+
 // Get supported companies
 app.get('/api/companies', (req, res) => {
   const companies = Object.entries(COMPANY_CONFIG).map(([key, config]) => ({
@@ -175,22 +208,28 @@ function processQueue() {
 async function performScrapeJob({ company, config, credentials, startDate, callbackUrl, callbackToken, bankAccountId, orgId }) {
   let result;
   try {
-    result = await performScrape(company, config, credentials, startDate);
+    result = await performScrape(company, config, credentials, startDate, orgId);
   } catch (error) {
     result = { success: false, error: error.message || 'Internal server error' };
   }
 
-  // POST result to callback URL
+  // POST result to callback URL with HMAC signature
   try {
+    const payload = JSON.stringify({ ...result, bankAccountId, orgId });
+    const timestamp = Date.now().toString();
+    const headers = { 'Content-Type': 'application/json' };
+
+    if (callbackToken) {
+      const sig = crypto
+        .createHmac('sha256', callbackToken)
+        .update(`${timestamp}.${payload}`)
+        .digest('hex');
+      headers['X-Signature'] = sig;
+      headers['X-Timestamp'] = timestamp;
+    }
+
     console.log(`Posting callback to ${callbackUrl} ...`);
-    const resp = await fetch(callbackUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(callbackToken ? { Authorization: `Bearer ${callbackToken}` } : {}),
-      },
-      body: JSON.stringify({ ...result, bankAccountId, orgId }),
-    });
+    const resp = await fetch(callbackUrl, { method: 'POST', headers, body: payload });
     console.log(`Callback response: ${resp.status}`);
   } catch (err) {
     console.error('Callback POST failed:', err.message);
@@ -198,12 +237,12 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
 }
 
 // Core scrape logic (shared by sync and async paths)
-async function performScrape(company, config, credentials, startDate) {
+async function performScrape(company, config, credentials, startDate, orgId) {
   let browser;
   try {
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
-    const userAgent = getRandomUserAgent();
-    console.log(`[${company}] Launching browser (UA: ${userAgent.slice(0, 40)}...)`);
+    const fp = orgId ? getFingerprintForOrg(orgId) : { ua: BROWSER_PROFILES[0].ua, timezone: 'Asia/Jerusalem', language: 'he-IL' };
+    console.log(`[${company}] Launching browser (org: ${orgId ?? 'unknown'}, UA: ${fp.ua.slice(0, 40)}...)`);
 
     browser = await puppeteer.launch({
       headless: true,
@@ -215,8 +254,9 @@ async function performScrape(company, config, credentials, startDate) {
         '--disable-gpu',
         '--no-zygote',
         '--single-process',
-        '--disable-blink-features=AutomationControlled',
-        `--user-agent=${userAgent}`,
+        // Note: AutomationControlled is already handled by puppeteer-extra-plugin-stealth
+        `--user-agent=${fp.ua}`,
+        `--lang=${fp.language}`,
       ],
     });
 
@@ -295,7 +335,7 @@ app.post('/api/scrape/:company', async (req, res) => {
   const { company } = req.params;
   const { startDate, callbackUrl, callbackToken, bankAccountId, orgId, ...credentials } = req.body;
 
-  console.log(`=== Scrape request for ${company} (${callbackUrl ? 'async' : 'sync'}) ===`);
+  console.log(`=== Scrape request for ${company} (${callbackUrl ? 'async' : 'sync'}) ===`, sanitizeForLog(req.body));
 
   const config = COMPANY_CONFIG[company];
   if (!config) {
@@ -327,7 +367,7 @@ app.post('/api/scrape/:company', async (req, res) => {
 
   // ── Sync mode: existing behavior ──
   try {
-    const result = await performScrape(company, config, credentials, startDate);
+    const result = await performScrape(company, config, credentials, startDate, orgId);
     if (!result.success) {
       return res.status(400).json(result);
     }
