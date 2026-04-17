@@ -11,9 +11,9 @@ puppeteer.use(StealthPlugin());
 // Same orgId always gets the same profile — consistent identity like a real user.
 // 3 mainstream profiles only — blend into the crowd, don't stand out.
 const BROWSER_PROFILES = [
-  { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36' },
-  { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36' },
-  { ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36' },
+  { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' },
+  { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' },
+  { ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' },
 ];
 
 function mulberry32(seed) {
@@ -254,7 +254,7 @@ async function performScrape(company, config, credentials, startDate, orgId) {
         '--disable-gpu',
         '--no-zygote',
         '--single-process',
-        // Note: AutomationControlled is already handled by puppeteer-extra-plugin-stealth
+        '--disable-blink-features=AutomationControlled',
         `--user-agent=${fp.ua}`,
         `--lang=${fp.language}`,
       ],
