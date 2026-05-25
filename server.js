@@ -1,5 +1,4 @@
 const express = require('express');
-const cors = require('cors');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -35,8 +34,11 @@ function getFingerprintForOrg(orgId) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Credential fields that must never appear in logs or error reports
-const SENSITIVE_KEYS = new Set(['password', 'userCode', 'id', 'card6Digits', 'nationalID', 'apiPassword', 'username', 'num']);
+// Credential fields that must never appear in logs or error reports.
+// `callbackToken` is the Convex callback HMAC secret (SCRAPER_CALLBACK_SECRET) —
+// it was previously logged via sanitizeForLog(req.body), leaking the secret to
+// Railway logs. Redact it (and callbackUrl, which is internal infra).
+const SENSITIVE_KEYS = new Set(['password', 'userCode', 'id', 'card6Digits', 'nationalID', 'apiPassword', 'username', 'num', 'callbackToken', 'callbackUrl']);
 
 // Returns a shallow copy of obj with sensitive keys replaced — safe to log
 function sanitizeForLog(obj) {
@@ -48,8 +50,48 @@ function sanitizeForLog(obj) {
   return out;
 }
 
-app.use(cors());
+// No CORS: this is a backend-to-backend API (called only by Convex actions),
+// never from a browser. Dropping the open `cors()` removes cross-origin exposure.
 app.use(express.json());
+
+// ── Inbound auth ──
+// Operational routes require `Authorization: Bearer <SCRAPER_API_KEY>`. Without
+// this, anyone who knows the URL could trigger scrape jobs (and point the
+// callback at their own URL). `/` and `/health` stay public for Railway health
+// checks.
+//
+// Rollout-safe by design: enforcement is ACTIVE only when SCRAPER_API_KEY is
+// set. If it's unset, requests are allowed (current pre-auth behavior) — so
+// deploying this code does NOT break sync before the env var exists. Sequence:
+// (1) deploy this code (no enforcement yet), (2) set SCRAPER_API_KEY here AND on
+// the Convex caller — enforcement then activates on both sides together. A
+// loud startup warning makes the unprotected window visible.
+const SCRAPER_API_KEY = process.env.SCRAPER_API_KEY;
+if (!SCRAPER_API_KEY) {
+  console.warn('⚠️  SCRAPER_API_KEY not set — /api routes are UNAUTHENTICATED. Set it (and the matching Convex env var) to enable inbound auth.');
+}
+
+function timingSafeEqualStr(a, b) {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path === '/health') return next();
+  // Enforce only when a key is configured (see rollout note above).
+  if (!SCRAPER_API_KEY) return next();
+  const authHeader = req.headers.authorization || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: 'UNAUTHORIZED' });
+  }
+  const token = authHeader.slice('Bearer '.length);
+  if (!timingSafeEqualStr(token, SCRAPER_API_KEY)) {
+    return res.status(403).json({ success: false, error: 'FORBIDDEN' });
+  }
+  next();
+});
 
 // Company configurations - what credentials each company needs
 const COMPANY_CONFIG = {
@@ -213,20 +255,43 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
     result = { success: false, error: error.message || 'Internal server error' };
   }
 
-  // POST result to callback URL with HMAC signature
+  // POST result to callback URL with an HMAC signature.
   try {
+    // SECURITY: prefer the secret from our OWN env var over one passed in the
+    // request body — the goal is that Finami stops sending the secret at all.
+    // Body value is only a transition fallback.
+    const signingKey = process.env.SCRAPER_CALLBACK_SECRET || callbackToken;
+    if (!signingKey) {
+      console.error('No callback signing key (SCRAPER_CALLBACK_SECRET unset and no callbackToken) — refusing to send unsigned callback');
+      return;
+    }
+
+    // SECURITY: only ever POST results to a Convex deployment, never an
+    // arbitrary URL supplied in the request (which would let a caller exfiltrate
+    // scrape results / use us as an SSRF relay).
+    let cbHost;
+    try {
+      cbHost = new URL(callbackUrl).host;
+    } catch {
+      console.error(`Invalid callbackUrl, refusing to send: ${callbackUrl}`);
+      return;
+    }
+    if (!cbHost.endsWith('.convex.site') && !cbHost.endsWith('.convex.cloud')) {
+      console.error(`callbackUrl host not allowlisted (must be *.convex.site/.cloud): ${cbHost}`);
+      return;
+    }
+
     const payload = JSON.stringify({ ...result, bankAccountId, orgId });
     const timestamp = Date.now().toString();
-    const headers = { 'Content-Type': 'application/json' };
-
-    if (callbackToken) {
-      const sig = crypto
-        .createHmac('sha256', callbackToken)
-        .update(`${timestamp}.${payload}`)
-        .digest('hex');
-      headers['X-Signature'] = sig;
-      headers['X-Timestamp'] = timestamp;
-    }
+    const sig = crypto
+      .createHmac('sha256', signingKey)
+      .update(`${timestamp}.${payload}`)
+      .digest('hex');
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Signature': sig,
+      'X-Timestamp': timestamp,
+    };
 
     console.log(`Posting callback to ${callbackUrl} ...`);
     const resp = await fetch(callbackUrl, { method: 'POST', headers, body: payload });

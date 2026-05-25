@@ -11,8 +11,7 @@
     "puppeteer": "^23.9.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "israeli-bank-scrapers": "^6.7.1",
-    "cors": "^2.8.5"
+    "israeli-bank-scrapers": "^5.4.7"
   },
   "engines": {
     "node": ">=18"
