@@ -80,8 +80,13 @@ function timingSafeEqualStr(a, b) {
 
 app.use((req, res, next) => {
   if (req.path === '/' || req.path === '/health') return next();
-  // Enforce only when a key is configured (see rollout note above).
-  if (!SCRAPER_API_KEY) return next();
+  
+  // Fail closed if the server is missing the key
+  if (!SCRAPER_API_KEY) {
+    console.error('CRITICAL: SCRAPER_API_KEY is not set. Refusing all API requests.');
+    return res.status(500).json({ success: false, error: 'SERVER_MISCONFIGURED' });
+  }
+
   const authHeader = req.headers.authorization || '';
   if (!authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ success: false, error: 'UNAUTHORIZED' });
@@ -269,6 +274,7 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
     // SECURITY: only ever POST results to a Convex deployment, never an
     // arbitrary URL supplied in the request (which would let a caller exfiltrate
     // scrape results / use us as an SSRF relay).
+    const EXPECTED_HOST = process.env.CONVEX_SITE_URL ? new URL(process.env.CONVEX_SITE_URL).host : null;
     let cbHost;
     try {
       cbHost = new URL(callbackUrl).host;
@@ -276,9 +282,17 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
       console.error(`Invalid callbackUrl, refusing to send: ${callbackUrl}`);
       return;
     }
-    if (!cbHost.endsWith('.convex.site') && !cbHost.endsWith('.convex.cloud')) {
-      console.error(`callbackUrl host not allowlisted (must be *.convex.site/.cloud): ${cbHost}`);
-      return;
+    
+    if (EXPECTED_HOST) {
+      if (cbHost !== EXPECTED_HOST) {
+        console.error(`callbackUrl host does not match CONVEX_SITE_URL: ${cbHost}`);
+        return;
+      }
+    } else {
+      if (!cbHost.endsWith('.convex.site') && !cbHost.endsWith('.convex.cloud')) {
+        console.error(`callbackUrl host not allowlisted (must be *.convex.site/.cloud): ${cbHost}`);
+        return;
+      }
     }
 
     const payload = JSON.stringify({ ...result, bankAccountId, orgId });
