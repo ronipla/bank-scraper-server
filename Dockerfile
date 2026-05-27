@@ -1,8 +1,11 @@
 FROM node:18-slim
 
-# Install all Chromium dependencies
+# Install Chromium's RUNTIME LIBS only — NOT the `chromium` package itself.
+# Puppeteer downloads its OWN version-matched Chromium (see npm install below);
+# Debian's `chromium` drifted ahead of puppeteer's pinned build, causing the
+# "Protocol error (Target.closeTarget): No target with given id found" crash.
+# Letting puppeteer manage the browser keeps the DevTools protocol in lockstep.
 RUN apt-get update && apt-get install -y \
-    chromium \
     libnss3 \
     libatk1.0-0 \
     libatk-bridge2.0-0 \
@@ -25,9 +28,11 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Puppeteer to skip downloading Chrome (we use system Chromium)
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Puppeteer downloads + manages its own version-matched Chromium during
+# `npm install` (cached under /root/.cache/puppeteer). Do NOT set
+# PUPPETEER_SKIP_CHROMIUM_DOWNLOAD or PUPPETEER_EXECUTABLE_PATH — letting
+# puppeteer.launch() pick its bundled browser is what fixes the protocol
+# mismatch. (server.js falls back to puppeteer's default when the env is unset.)
 
 WORKDIR /app
 
