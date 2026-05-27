@@ -1,4 +1,4 @@
-FROM node:18-slim
+FROM node:22-slim
 
 # Install Chromium's RUNTIME LIBS only — NOT the `chromium` package itself.
 # Puppeteer downloads its OWN version-matched Chromium (see npm install below);
