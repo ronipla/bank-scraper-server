@@ -331,8 +331,11 @@ async function performScrape(company, config, credentials, startDate, orgId) {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--no-zygote',
-        '--single-process',
+        // NOTE: --single-process and --no-zygote were REMOVED (2026-05-27).
+        // They were the cause of "Protocol error (Target.closeTarget): No
+        // target with given id found" — Chromium's single-process mode crashes
+        // the renderer target mid-navigation on heavy bank pages. Memory was
+        // never the constraint (peak ~0.4GB), so these flags only hurt.
         '--disable-blink-features=AutomationControlled',
         `--user-agent=${fp.ua}`,
         `--lang=${fp.language}`,
