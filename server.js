@@ -319,7 +319,11 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
 async function performScrape(company, config, credentials, startDate, orgId) {
   let browser;
   try {
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
+    // When PUPPETEER_EXECUTABLE_PATH is unset, leave executablePath undefined so
+    // puppeteer.launch() uses its OWN version-matched bundled Chromium (the fix
+    // for the closeTarget protocol mismatch). The env override is still honored
+    // if explicitly set (e.g. for local dev against a system Chrome).
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
     const fp = orgId ? getFingerprintForOrg(orgId) : { ua: BROWSER_PROFILES[0].ua, timezone: 'Asia/Jerusalem', language: 'he-IL' };
     console.log(`[${company}] Launching browser (org: ${orgId ?? 'unknown'}, UA: ${fp.ua.slice(0, 40)}...)`);
 
@@ -484,6 +488,6 @@ app.post('/api/scrape-discount', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log('Chromium path:', process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium');
+  console.log('Chromium path:', process.env.PUPPETEER_EXECUTABLE_PATH || '(puppeteer bundled)');
   console.log('Supported companies:', Object.keys(COMPANY_CONFIG).join(', '));
 });
