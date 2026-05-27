@@ -356,6 +356,14 @@ async function performScrape(company, config, credentials, startDate, orgId) {
     console.log(`[${company}] Scrape completed — success: ${result.success}`);
 
     if (!result.success) {
+      // Log the real failure reason — errorType + errorMessage from
+      // israeli-bank-scrapers. Without this the server only logged
+      // "success: false", hiding WHY (e.g. GENERAL_ERROR vs INVALID_PASSWORD
+      // vs CHANGE_PASSWORD), which made diagnosing stale-library/site-change
+      // failures impossible. Credentials are never logged.
+      console.warn(
+        `[${company}] Scrape FAILED — errorType: ${result.errorType || 'SCRAPING_FAILED'} | errorMessage: ${result.errorMessage || '(none)'}`,
+      );
       return {
         success: false,
         error: result.errorType || 'SCRAPING_FAILED',
