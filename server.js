@@ -355,6 +355,13 @@ async function performScrape(company, config, credentials, startDate, orgId) {
       combineInstallments: false,
       showBrowser: false,
       browser,
+      // We own the browser lifecycle and close it ourselves in `finally`.
+      // Without this, israeli-bank-scrapers ALSO closes it when the scrape
+      // finishes → our finally then double-closes → "Protocol error
+      // (Target.closeTarget): No target with given id found", which surfaced as
+      // GENERAL_ERROR and masked the real scrape result. THIS is the bug — not
+      // credentials, not the library version, not --single-process.
+      skipCloseBrowser: true,
     });
 
     const mappedCredentials = config.mapCredentials(credentials);
