@@ -4,11 +4,13 @@
   "description": "Israeli bank scraper API for Railway",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "express": "^4.18.2",
     "israeli-bank-scrapers": "^6.7.4",
+    "patch-package": "^8.0.1",
     "puppeteer": "^24.43.1",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
