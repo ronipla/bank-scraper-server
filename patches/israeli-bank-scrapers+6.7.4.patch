@@ -1,28 +1,35 @@
 diff --git a/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js b/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
-index 630d930..2450333 100644
+index 630d930..5431eb6 100644
 --- a/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
 +++ b/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
-@@ -82,14 +82,28 @@ async function fetchAccountData(page, options) {
- async function navigateOrErrorLabel(page) {
-   try {
-     await (0, _navigation.waitForNavigation)(page);
-+    // PATCH (retail3 SPA timing): Discount's new portal is a single-page app —
-+    // after the server redirect the browser first shows a loading shell (green
-+    // spinner) and only LATER sets the client-side hash route
-+    // (#/MY_ACCOUNT_HOMEPAGE). waitForNavigation resolves on that first load, so
-+    // the base scraper read the URL mid-load and matched nothing → UNKNOWN_ERROR.
-+    // Wait (client-side) until the URL settles onto a retail* account page (or a
-+    // login/password page) before letting the result check run. Bounded + safe:
-+    // on timeout we just fall through to the existing check with whatever URL.
-+    try {
-+      await (0, _navigation.waitForUrl)(page, /\/apollo\/retail\d*\/|\/login\/#\/|masterPage\.html#\//, 15000, true);
-+    } catch (settleErr) {
-+      // URL never settled to a known state within the timeout — fall through and
-+      // let getKeyByValue classify whatever the current URL is.
-+    }
+@@ -85,11 +85,35 @@ async function navigateOrErrorLabel(page) {
    } catch (e) {
      await (0, _elementsInteractions.waitUntilElementFound)(page, '#general-error', false, 100);
    }
++  // PATCH (retail3 SPA timing): Discount's new portal is a single-page app. After
++  // login the browser shows a loading shell (green spinner) and only LATER sets
++  // the client-side hash route (#/MY_ACCOUNT_HOMEPAGE) — WITHOUT a classic
++  // navigation event, so waitForNavigation above either resolves on the shell or
++  // REJECTS (no nav fired). Either way the base scraper then read window.location
++  // mid-load and matched nothing → UNKNOWN_ERROR. Run this settle-wait
++  // UNCONDITIONALLY (outside the try/catch) so it works whichever branch ran:
++  // wait (client-side) until the URL reaches a known account/login/password page
++  // before the result check. Bounded + safe — on timeout we fall through with
++  // whatever the current URL is, preserving original behavior.
++  try {
++    await (0, _navigation.waitForUrl)(page, /\/apollo\/retail\d*\/|\/login\/#\/|masterPage\.html#\//, 15000, true);
++  } catch (settleErr) {
++    // URL never settled to a known state within the timeout — fall through.
++  }
++  // MEASURE (diagnostic): log the exact client-side URL the result check will see.
++  // Server-side browser.pages() read came back empty (library closed its pages),
++  // so this is the only reliable way to learn the settled URL. Remove once stable.
++  try {
++    const settledUrl = await page.evaluate(() => window.location.href);
++    console.log(`[discount][patch] settled window.location.href before result check: ${settledUrl}`);
++  } catch (logErr) {
++    console.log(`[discount][patch] could not read settled URL: ${logErr.message}`);
++  }
  }
  function getPossibleLoginResults() {
    const urls = {};
