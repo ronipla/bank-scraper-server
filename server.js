@@ -6,6 +6,60 @@ const { createScraper, CompanyTypes } = require('israeli-bank-scrapers');
 
 puppeteer.use(StealthPlugin());
 
+// ── Failure screenshot capture (DIAGNOSTIC, opt-in) ──
+// When a scrape fails, we don't know WHAT the bank showed (locked? wrong creds?
+// terms popup? CAPTCHA?). The `errorType` alone (e.g. AUTH_FAILURE) can't
+// distinguish "wrong password" from "account locked" — both surface the same.
+// This grabs the live page and uploads it to a TEMPORARY anonymous host so it
+// can be inspected, WITHOUT writing to a disk we can't read.
+//
+// Gated by CAPTURE_FAILURE_SCREENSHOTS=1 so it stays OFF in normal operation —
+// a screenshot of a logged-in bank page is sensitive. The login page that an
+// AUTH_FAILURE produces shows no account data, only the bank's error message.
+const CAPTURE_FAILURE_SCREENSHOTS = process.env.CAPTURE_FAILURE_SCREENSHOTS === '1';
+
+// Upload a PNG buffer to tmpfiles.org (anonymous, auto-expires ~1h). Returns the
+// direct URL or null. Best-effort — never throws into the scrape path.
+async function uploadScreenshot(pngBuffer, company) {
+  try {
+    const form = new FormData();
+    const blob = new Blob([pngBuffer], { type: 'image/png' });
+    form.append('file', blob, `fail-${company}-${Date.now()}.png`);
+    const resp = await fetch('https://tmpfiles.org/api/v1/upload', { method: 'POST', body: form });
+    if (!resp.ok) {
+      console.warn(`[${company}] screenshot upload failed: HTTP ${resp.status}`);
+      return null;
+    }
+    const json = await resp.json();
+    // tmpfiles returns a viewer URL like https://tmpfiles.org/12345/name.png;
+    // the direct-download form is https://tmpfiles.org/dl/12345/name.png
+    const url = json?.data?.url || null;
+    return url ? url.replace('tmpfiles.org/', 'tmpfiles.org/dl/') : null;
+  } catch (err) {
+    console.warn(`[${company}] screenshot upload error: ${err.message}`);
+    return null;
+  }
+}
+
+// Find the most relevant open page in the browser we own and screenshot it.
+// We pick the LAST page (the bank's login/error page after a failed attempt).
+async function captureFailureScreenshot(browser, company) {
+  try {
+    const pages = await browser.pages();
+    const page = pages[pages.length - 1];
+    if (!page) return null;
+    const buf = await page.screenshot({ fullPage: true, type: 'png' });
+    let currentUrl = '(unknown)';
+    try { currentUrl = page.url(); } catch { /* ignore */ }
+    const link = await uploadScreenshot(buf, company);
+    console.warn(`[${company}] FAILURE SCREENSHOT — page=${currentUrl} | url=${link || '(upload failed)'}`);
+    return { screenshotUrl: link, pageUrl: currentUrl };
+  } catch (err) {
+    console.warn(`[${company}] could not capture failure screenshot: ${err.message}`);
+    return null;
+  }
+}
+
 // ── Deterministic fingerprint per org ──
 // Same orgId always gets the same profile — consistent identity like a real user.
 // 3 mainstream profiles only — blend into the crowd, don't stand out.
@@ -252,10 +306,10 @@ function processQueue() {
   }
 }
 
-async function performScrapeJob({ company, config, credentials, startDate, callbackUrl, callbackToken, bankAccountId, orgId }) {
+async function performScrapeJob({ company, config, credentials, startDate, callbackUrl, callbackToken, bankAccountId, orgId, captureFailureScreenshot }) {
   let result;
   try {
-    result = await performScrape(company, config, credentials, startDate, orgId);
+    result = await performScrape(company, config, credentials, startDate, orgId, captureFailureScreenshot);
   } catch (error) {
     result = { success: false, error: error.message || 'Internal server error' };
   }
@@ -315,8 +369,10 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
   }
 }
 
-// Core scrape logic (shared by sync and async paths)
-async function performScrape(company, config, credentials, startDate, orgId) {
+// Core scrape logic (shared by sync and async paths). `captureScreenshot`
+// (per-request) OR the CAPTURE_FAILURE_SCREENSHOTS env var enables the
+// diagnostic failure-page screenshot.
+async function performScrape(company, config, credentials, startDate, orgId, captureScreenshot = false) {
   let browser;
   try {
     // When PUPPETEER_EXECUTABLE_PATH is unset, leave executablePath undefined so
@@ -378,10 +434,21 @@ async function performScrape(company, config, credentials, startDate, orgId) {
       console.warn(
         `[${company}] Scrape FAILED — errorType: ${result.errorType || 'SCRAPING_FAILED'} | errorMessage: ${result.errorMessage || '(none)'}`,
       );
+
+      // Diagnostic: capture what the bank actually showed (login error page),
+      // so AUTH_FAILURE can be told apart from "account locked" / terms popup /
+      // CAPTCHA. Off by default; enabled per-run (captureScreenshot arg) or
+      // globally via CAPTURE_FAILURE_SCREENSHOTS.
+      let capture = null;
+      if (captureScreenshot || CAPTURE_FAILURE_SCREENSHOTS) {
+        capture = await captureFailureScreenshot(browser, company);
+      }
+
       return {
         success: false,
         error: result.errorType || 'SCRAPING_FAILED',
         errorMessage: result.errorMessage || null,
+        ...(capture ? { screenshotUrl: capture.screenshotUrl, pageUrl: capture.pageUrl } : {}),
       };
     }
 
@@ -434,7 +501,9 @@ async function performScrape(company, config, credentials, startDate, orgId) {
 // Generic scrape endpoint — supports both sync and async (webhook) modes
 app.post('/api/scrape/:company', async (req, res) => {
   const { company } = req.params;
-  const { startDate, callbackUrl, callbackToken, bankAccountId, orgId, ...credentials } = req.body;
+  // Pull control fields OUT of `credentials` so they aren't sent to the scraper
+  // as bank fields. `captureFailureScreenshot` is the per-request diagnostic flag.
+  const { startDate, callbackUrl, callbackToken, bankAccountId, orgId, captureFailureScreenshot, ...credentials } = req.body;
 
   console.log(`=== Scrape request for ${company} (${callbackUrl ? 'async' : 'sync'}) ===`, sanitizeForLog(req.body));
 
@@ -462,13 +531,13 @@ app.post('/api/scrape/:company', async (req, res) => {
   if (callbackUrl) {
     const jobId = `${company}-${Date.now()}`;
     console.log(`[${jobId}] Enqueuing async scrape (queue: ${scrapeQueue.length}, active: ${activeScrapes})`);
-    enqueueScrape({ company, config, credentials, startDate, callbackUrl, callbackToken, bankAccountId, orgId });
+    enqueueScrape({ company, config, credentials, startDate, callbackUrl, callbackToken, bankAccountId, orgId, captureFailureScreenshot });
     return res.status(202).json({ accepted: true, jobId });
   }
 
   // ── Sync mode: existing behavior ──
   try {
-    const result = await performScrape(company, config, credentials, startDate, orgId);
+    const result = await performScrape(company, config, credentials, startDate, orgId, captureFailureScreenshot);
     if (!result.success) {
       return res.status(400).json(result);
     }
