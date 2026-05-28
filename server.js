@@ -456,8 +456,22 @@ async function performScrape(company, config, credentials, startDate, orgId, cap
       // locked" / terms popup / CAPTCHA. Off by default; enabled per-run
       // (captureScreenshot arg) or globally via CAPTURE_FAILURE_SCREENSHOTS.
       let screenshotUrl = null;
+      let failurePageUrls = null;
       if (failureShotPath) {
         screenshotUrl = await uploadScreenshotFile(failureShotPath, company);
+        // Capture the EXACT URL(s) the browser is on at failure. For a SPA bank
+        // (Discount retail3), the library's success-URL match fails when it reads
+        // the URL before the client-side hash route settles — logging the real
+        // URLs tells us precisely what to match, instead of guessing URL strings.
+        try {
+          const pages = await browser.pages();
+          failurePageUrls = (await Promise.all(pages.map(async (p) => {
+            try { return p.url(); } catch { return '(closed)'; }
+          }))).filter((u) => u && u !== 'about:blank');
+          console.warn(`[${company}] FAILURE PAGE URLS — ${JSON.stringify(failurePageUrls)}`);
+        } catch (e) {
+          console.warn(`[${company}] could not read failure page URLs: ${e.message}`);
+        }
       }
 
       return {
@@ -465,6 +479,7 @@ async function performScrape(company, config, credentials, startDate, orgId, cap
         error: result.errorType || 'SCRAPING_FAILED',
         errorMessage: result.errorMessage || null,
         ...(screenshotUrl ? { screenshotUrl } : {}),
+        ...(failurePageUrls ? { failurePageUrls } : {}),
       };
     }
 

@@ -1,8 +1,28 @@
 diff --git a/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js b/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
-index 630d930..b0f8ef4 100644
+index 630d930..2450333 100644
 --- a/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
 +++ b/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
-@@ -88,8 +88,8 @@ async function navigateOrErrorLabel(page) {
+@@ -82,14 +82,28 @@ async function fetchAccountData(page, options) {
+ async function navigateOrErrorLabel(page) {
+   try {
+     await (0, _navigation.waitForNavigation)(page);
++    // PATCH (retail3 SPA timing): Discount's new portal is a single-page app —
++    // after the server redirect the browser first shows a loading shell (green
++    // spinner) and only LATER sets the client-side hash route
++    // (#/MY_ACCOUNT_HOMEPAGE). waitForNavigation resolves on that first load, so
++    // the base scraper read the URL mid-load and matched nothing → UNKNOWN_ERROR.
++    // Wait (client-side) until the URL settles onto a retail* account page (or a
++    // login/password page) before letting the result check run. Bounded + safe:
++    // on timeout we just fall through to the existing check with whatever URL.
++    try {
++      await (0, _navigation.waitForUrl)(page, /\/apollo\/retail\d*\/|\/login\/#\/|masterPage\.html#\//, 15000, true);
++    } catch (settleErr) {
++      // URL never settled to a known state within the timeout — fall through and
++      // let getKeyByValue classify whatever the current URL is.
++    }
+   } catch (e) {
+     await (0, _elementsInteractions.waitUntilElementFound)(page, '#general-error', false, 100);
+   }
  }
  function getPossibleLoginResults() {
    const urls = {};
