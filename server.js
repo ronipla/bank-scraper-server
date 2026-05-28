@@ -91,6 +91,37 @@ function getFingerprintForOrg(orgId) {
   return { ua: profile.ua, timezone: 'Asia/Jerusalem', language: 'he-IL' };
 }
 
+// Single source of truth for puppeteer.launch() options. Shared by performScrape
+// AND the /health/browser watchdog endpoint so the health check exercises the
+// EXACT same launch path the real scrape uses — if Chromium/puppeteer drift or a
+// Docker lib goes missing, the watchdog catches it before a customer sync does.
+// Leave executablePath undefined when PUPPETEER_EXECUTABLE_PATH is unset so
+// puppeteer uses its own version-matched bundled Chromium (the closeTarget fix).
+function buildLaunchOptions(orgId) {
+  const fp = orgId
+    ? getFingerprintForOrg(orgId)
+    : { ua: BROWSER_PROFILES[0].ua, timezone: 'Asia/Jerusalem', language: 'he-IL' };
+  return {
+    options: {
+      headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        // --single-process / --no-zygote were REMOVED (2026-05-27): single-process
+        // mode crashed the renderer target mid-navigation on heavy bank pages
+        // ("Target.closeTarget"). Memory was never the constraint (~0.4GB peak).
+        '--disable-blink-features=AutomationControlled',
+        `--user-agent=${fp.ua}`,
+        `--lang=${fp.language}`,
+      ],
+    },
+    fp,
+  };
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -281,6 +312,75 @@ app.get('/metrics', (req, res) => {
   });
 });
 
+// ── Watchdog health endpoints (AUTHENTICATED — require SCRAPER_API_KEY) ──
+// These power the cloud watchdog (GitHub Actions). They are NOT in the public
+// whitelist (only `/` and `/health` are) because launching a browser is a real
+// cost and the version/patch state is internal. The inbound-auth middleware
+// above already guards every non-`/`,`/health` route, so these inherit it.
+
+// Can puppeteer actually launch the SAME Chromium the real scrape uses? This is
+// the single highest-signal light check — catches Chromium/puppeteer version
+// drift, the Target.closeTarget crash class, missing Docker libs, and OOM,
+// WITHOUT any bank login. Bounded by a hard timeout so a hung launch can't hang
+// the request. No credentials, nothing sensitive in the response.
+app.get('/health/browser', async (req, res) => {
+  const t0 = Date.now();
+  let browser;
+  try {
+    const { options } = buildLaunchOptions(null);
+    const launchAndProbe = (async () => {
+      browser = await puppeteer.launch(options);
+      const page = await browser.newPage();
+      await page.goto('about:blank');
+      const chromiumVersion = await browser.version();
+      return chromiumVersion;
+    })();
+    // 30s ceiling — a healthy launch is ~1-3s; anything near this is a red flag.
+    const chromiumVersion = await Promise.race([
+      launchAndProbe,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('launch timeout (30s)')), 30_000)),
+    ]);
+    res.json({ ok: true, launchMs: Date.now() - t0, chromiumVersion });
+  } catch (err) {
+    console.warn(`[health/browser] launch failed: ${err.message}`);
+    res.status(503).json({ ok: false, launchMs: Date.now() - t0, error: err.message });
+  } finally {
+    if (browser) {
+      try { await browser.close(); } catch { /* ignore */ }
+    }
+  }
+});
+
+// Report the installed israeli-bank-scrapers version + whether our patch-package
+// patch is still applied. We verify by checking the patch's load-bearing strings
+// in the installed file (O(1) read) rather than re-running patch-package at
+// request time. patchesApplied:false means a fresh install overwrote the file
+// and postinstall didn't re-apply (or a version bump silently broke the patch) —
+// i.e. the retail3 Discount fix is NOT live. The watchdog turns that into a
+// CRITICAL alert. No npm network call here (that comparison lives in the runner).
+app.get('/health/library', (req, res) => {
+  try {
+    // eslint-disable-next-line global-require
+    const installedVersion = require('israeli-bank-scrapers/package.json').version;
+    const discountPath = require.resolve('israeli-bank-scrapers/lib/scrapers/discount.js');
+    const src = fs.readFileSync(discountPath, 'utf8');
+    // The two markers the retail3 patch introduces (see
+    // patches/israeli-bank-scrapers+6.7.4.patch). Both present → patch is live.
+    const settleWait = src.includes('waitForUrl') && src.includes('apollo\\/retail');
+    const retail3Url = src.includes('apollo/retail3/#/MY_ACCOUNT_HOMEPAGE');
+    const patchesApplied = settleWait && retail3Url;
+    res.json({
+      ok: true,
+      installedVersion,
+      patchesApplied,
+      patchTargets: { settleWait, retail3Url },
+    });
+  } catch (err) {
+    console.warn(`[health/library] check failed: ${err.message}`);
+    res.status(503).json({ ok: false, error: err.message });
+  }
+});
+
 // Get supported companies
 app.get('/api/companies', (req, res) => {
   const companies = Object.entries(COMPANY_CONFIG).map(([key, config]) => ({
@@ -381,32 +481,10 @@ async function performScrapeJob({ company, config, credentials, startDate, callb
 async function performScrape(company, config, credentials, startDate, orgId, captureScreenshot = false) {
   let browser;
   try {
-    // When PUPPETEER_EXECUTABLE_PATH is unset, leave executablePath undefined so
-    // puppeteer.launch() uses its OWN version-matched bundled Chromium (the fix
-    // for the closeTarget protocol mismatch). The env override is still honored
-    // if explicitly set (e.g. for local dev against a system Chrome).
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-    const fp = orgId ? getFingerprintForOrg(orgId) : { ua: BROWSER_PROFILES[0].ua, timezone: 'Asia/Jerusalem', language: 'he-IL' };
+    const { options: launchOptions, fp } = buildLaunchOptions(orgId);
     console.log(`[${company}] Launching browser (org: ${orgId ?? 'unknown'}, UA: ${fp.ua.slice(0, 40)}...)`);
 
-    browser = await puppeteer.launch({
-      headless: true,
-      executablePath,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        // NOTE: --single-process and --no-zygote were REMOVED (2026-05-27).
-        // They were the cause of "Protocol error (Target.closeTarget): No
-        // target with given id found" — Chromium's single-process mode crashes
-        // the renderer target mid-navigation on heavy bank pages. Memory was
-        // never the constraint (peak ~0.4GB), so these flags only hurt.
-        '--disable-blink-features=AutomationControlled',
-        `--user-agent=${fp.ua}`,
-        `--lang=${fp.language}`,
-      ],
-    });
+    browser = await puppeteer.launch(launchOptions);
 
     const scrapeStartDate = new Date(startDate || Date.now() - 180 * 24 * 60 * 60 * 1000);
     console.log(`[${company}] Scrape start date: ${scrapeStartDate.toISOString()}`);

@@ -1,0 +1,83 @@
+# Canary watchdog — ONE real bank login per day, dedicated TEST account.
+#
+# Verifies the full deployed stack (browser + stealth + ibs + retail3 patch) can
+# still log into a real bank — catches a site change (the Discount-retail3 class
+# of break) the light checks can't see. A failed login → ONE Telegram/Hermes
+# alert; never retries.
+#
+# ── DORMANT UNTIL OPT-IN ──────────────────────────────────────────────────
+# Stays completely dormant until you add the CANARY_CREDENTIALS repo secret
+# (a test account's JSON creds). The guard job skips everything (green) without
+# it. To turn off: remove CANARY_CREDENTIALS.
+#
+# ── LOCKOUT SAFETY ────────────────────────────────────────────────────────
+# Once-daily cron only (no `push`). concurrency cancel-in-progress:false means a
+# manual dispatch won't double-fire alongside the cron. scripts/canary.mjs makes
+# exactly ONE login attempt with no retry. Use a THROWAWAY test account — never a
+# customer's. (The canary bypasses Convex entirely, so customer data is never
+# touched.) Do NOT click "re-run" repeatedly.
+
+name: Watchdog (canary)
+
+on:
+  schedule:
+    - cron: "0 5 * * *"   # 05:00 UTC = 08:00 Israel — before morning syncs
+  workflow_dispatch: {}
+
+concurrency:
+  group: watchdog-canary
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Verify opt-in canary secrets
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        run: |
+          if [ -z "${{ secrets.CANARY_CREDENTIALS }}" ] \
+            || [ -z "${{ secrets.SCRAPER_URL }}" ] \
+            || [ -z "${{ secrets.SCRAPER_API_KEY }}" ] \
+            || [ -z "${{ vars.CANARY_BANK_TYPE }}" ] \
+            || [ -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] \
+            || [ -z "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⏭️  Canary skipped — opt-in"
+              echo ""
+              echo "The daily login canary is dormant until ALL of these exist:"
+              echo "- secret \`CANARY_CREDENTIALS\` (JSON creds of a DEDICATED TEST account)"
+              echo "- variable \`CANARY_BANK_TYPE\` (e.g. \`discount\`)"
+              echo "- secrets \`SCRAPER_URL\`, \`SCRAPER_API_KEY\`"
+              echo "- secrets \`TELEGRAM_BOT_TOKEN\`, \`TELEGRAM_CHAT_ID\`"
+              echo ""
+              echo "⚠️ Use a THROWAWAY test account — never a customer's."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  canary:
+    name: Single login canary
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run canary (one login, no retry)
+        continue-on-error: true   # a failed login is an alert, not a red build
+        env:
+          SCRAPER_URL: ${{ secrets.SCRAPER_URL }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          CANARY_BANK_TYPE: ${{ vars.CANARY_BANK_TYPE }}
+          CANARY_CREDENTIALS: ${{ secrets.CANARY_CREDENTIALS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HERMES_WEBHOOK_URL: ${{ secrets.HERMES_WEBHOOK_URL }}
+        run: node scripts/canary.mjs

@@ -1,0 +1,66 @@
+# Light scraper watchdog — frequent, zero bank logins.
+#
+# Hits the DEPLOYED scraper's health endpoints (/health, /health/browser,
+# /health/library) and compares the installed israeli-bank-scrapers version to
+# npm. Catches: server down, Chromium can't launch, the retail3 patch silently
+# un-applied, a new library release. Alerts via Telegram + Hermes (best-effort);
+# always writes a step summary. NEVER hard-fails the build — the alert is the
+# signal, not a red X.
+#
+# Runs as soon as SCRAPER_URL + SCRAPER_API_KEY repo secrets exist. Alert
+# secrets (TELEGRAM_*, HERMES_WEBHOOK_URL) are optional — notify() degrades
+# gracefully and the run still reports via the step summary without them.
+
+name: Watchdog (light)
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # every 6 hours
+  workflow_dispatch: {}
+
+concurrency:
+  group: watchdog-light
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Verify scraper secrets
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        run: |
+          if [ -z "${{ secrets.SCRAPER_URL }}" ] || [ -z "${{ secrets.SCRAPER_API_KEY }}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### ⏭️  Light watchdog skipped"
+              echo ""
+              echo "Add the \`SCRAPER_URL\` and \`SCRAPER_API_KEY\` repository secrets to enable"
+              echo "the light watchdog (health/browser/library checks)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  light:
+    name: Light checks
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Dependency-free pure-Node script — no `npm install` needed.
+      - name: Run light watchdog
+        continue-on-error: true   # detected breakage must not red-X the run; the alert carries the signal
+        env:
+          SCRAPER_URL: ${{ secrets.SCRAPER_URL }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HERMES_WEBHOOK_URL: ${{ secrets.HERMES_WEBHOOK_URL }}
+        run: node scripts/watchdog.mjs
