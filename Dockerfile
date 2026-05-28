@@ -36,7 +36,13 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Copy package manifests AND the patches/ dir BEFORE npm install. The postinstall
+# hook runs patch-package, which needs patches/ present at install time. Copying
+# patches/ here also means a changed patch invalidates the npm-install layer cache
+# — otherwise Docker reuses a cached install layer that applied a STALE patch even
+# though patches/ changed (this exact bug shipped the wrong patch version once).
 COPY package*.json ./
+COPY patches ./patches
 RUN npm install --production
 
 COPY . .
