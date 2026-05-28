@@ -1,5 +1,8 @@
 const express = require('express');
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { createScraper, CompanyTypes } = require('israeli-bank-scrapers');
@@ -41,21 +44,24 @@ async function uploadScreenshot(pngBuffer, company) {
   }
 }
 
-// Find the most relevant open page in the browser we own and screenshot it.
-// We pick the LAST page (the bank's login/error page after a failed attempt).
-async function captureFailureScreenshot(browser, company) {
+// Read a screenshot file the LIBRARY wrote (via storeFailureScreenShotPath) and
+// upload it. The library captures its OWN page (this.page — the real bank login
+// page) at the moment login fails, BEFORE tearing it down. That's the page we
+// actually want — earlier we screenshotted browser.pages().last() which, after
+// the library closed its page, was a leftover about:blank tab. Best-effort.
+async function uploadScreenshotFile(filePath, company) {
   try {
-    const pages = await browser.pages();
-    const page = pages[pages.length - 1];
-    if (!page) return null;
-    const buf = await page.screenshot({ fullPage: true, type: 'png' });
-    let currentUrl = '(unknown)';
-    try { currentUrl = page.url(); } catch { /* ignore */ }
+    if (!fs.existsSync(filePath)) {
+      console.warn(`[${company}] failure screenshot not found at ${filePath} (login may have failed before page render)`);
+      return null;
+    }
+    const buf = fs.readFileSync(filePath);
     const link = await uploadScreenshot(buf, company);
-    console.warn(`[${company}] FAILURE SCREENSHOT — page=${currentUrl} | url=${link || '(upload failed)'}`);
-    return { screenshotUrl: link, pageUrl: currentUrl };
+    console.warn(`[${company}] FAILURE SCREENSHOT (library-captured page) — url=${link || '(upload failed)'} | bytes=${buf.length}`);
+    try { fs.unlinkSync(filePath); } catch { /* ignore cleanup */ }
+    return link;
   } catch (err) {
-    console.warn(`[${company}] could not capture failure screenshot: ${err.message}`);
+    console.warn(`[${company}] could not read/upload failure screenshot: ${err.message}`);
     return null;
   }
 }
@@ -405,6 +411,15 @@ async function performScrape(company, config, credentials, startDate, orgId, cap
     const scrapeStartDate = new Date(startDate || Date.now() - 180 * 24 * 60 * 60 * 1000);
     console.log(`[${company}] Scrape start date: ${scrapeStartDate.toISOString()}`);
 
+    // When diagnostic capture is on, tell the library to screenshot its OWN page
+    // (the real bank login/error page) to this temp file at the moment login
+    // fails — we read it back + upload below. This captures the correct page,
+    // unlike grabbing browser.pages().last() after the library tore its page down.
+    const wantCapture = captureScreenshot || CAPTURE_FAILURE_SCREENSHOTS;
+    const failureShotPath = wantCapture
+      ? path.join(os.tmpdir(), `fail-${company}-${Date.now()}.png`)
+      : undefined;
+
     const scraper = createScraper({
       companyId: config.companyId,
       startDate: scrapeStartDate,
@@ -418,6 +433,7 @@ async function performScrape(company, config, credentials, startDate, orgId, cap
       // GENERAL_ERROR and masked the real scrape result. THIS is the bug — not
       // credentials, not the library version, not --single-process.
       skipCloseBrowser: true,
+      ...(failureShotPath ? { storeFailureScreenShotPath: failureShotPath } : {}),
     });
 
     const mappedCredentials = config.mapCredentials(credentials);
@@ -435,20 +451,20 @@ async function performScrape(company, config, credentials, startDate, orgId, cap
         `[${company}] Scrape FAILED — errorType: ${result.errorType || 'SCRAPING_FAILED'} | errorMessage: ${result.errorMessage || '(none)'}`,
       );
 
-      // Diagnostic: capture what the bank actually showed (login error page),
-      // so AUTH_FAILURE can be told apart from "account locked" / terms popup /
-      // CAPTCHA. Off by default; enabled per-run (captureScreenshot arg) or
-      // globally via CAPTURE_FAILURE_SCREENSHOTS.
-      let capture = null;
-      if (captureScreenshot || CAPTURE_FAILURE_SCREENSHOTS) {
-        capture = await captureFailureScreenshot(browser, company);
+      // Diagnostic: upload the page the LIBRARY captured at failure (the real
+      // bank login/error page), so GENERAL_ERROR can be told apart from "account
+      // locked" / terms popup / CAPTCHA. Off by default; enabled per-run
+      // (captureScreenshot arg) or globally via CAPTURE_FAILURE_SCREENSHOTS.
+      let screenshotUrl = null;
+      if (failureShotPath) {
+        screenshotUrl = await uploadScreenshotFile(failureShotPath, company);
       }
 
       return {
         success: false,
         error: result.errorType || 'SCRAPING_FAILED',
         errorMessage: result.errorMessage || null,
-        ...(capture ? { screenshotUrl: capture.screenshotUrl, pageUrl: capture.pageUrl } : {}),
+        ...(screenshotUrl ? { screenshotUrl } : {}),
       };
     }
 
