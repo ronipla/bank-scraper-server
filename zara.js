@@ -128,11 +128,21 @@ function createZaraHandler({ puppeteer, buildLaunchOptions }) {
     try {
       const { options } = buildLaunchOptions();
       browser = await puppeteer.launch(options);
-      const results = [];
-      // Sequential: gentle on Akamai + memory (~0.4GB peak, like the bank path).
-      for (const [store, lang] of markets) {
-        results.push(await readMarket(browser, productId, store, lang, log));
-      }
+      // Limited concurrency: 5 pages share ONE browser, so a batch of ~5 markets
+      // returns in ~3s instead of ~9s. The caller (Convex) sends small batches
+      // sequentially, so only one of these browsers is ever live at a time —
+      // keeping memory bounded and never crowding the bank scrapers.
+      const CONCURRENCY = 5;
+      const results = new Array(markets.length);
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < markets.length) {
+          const idx = cursor++;
+          const [store, lang] = markets[idx];
+          results[idx] = await readMarket(browser, productId, store, lang, log);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, markets.length) }, worker));
       const available = results.filter((r) => r.available);
       return res.json({
         success: true,
