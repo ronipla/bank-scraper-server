@@ -6,7 +6,7 @@ const path = require('path');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { createScraper, CompanyTypes } = require('israeli-bank-scrapers');
-const { createZaraHandler } = require('./zara');
+const { createRetailHandler } = require('./retail');
 
 puppeteer.use(StealthPlugin());
 
@@ -672,10 +672,15 @@ app.post('/api/scrape-discount', async (req, res) => {
   return app._router.handle({ ...req, url: '/api/scrape/discount', method: 'POST' }, res, () => {});
 });
 
-// ── SubIndex: Zara per-country price reader (isolated; its own browser) ──
+// ── SubIndex: multi-retailer per-country price reader (isolated; own browser) ──
 // Reuses the shared stealth `puppeteer` + `buildLaunchOptions`. Auth-protected by
-// the same SCRAPER_API_KEY middleware as every other /api route.
-app.post('/api/zara-price', createZaraHandler({ puppeteer, buildLaunchOptions }));
+// the same SCRAPER_API_KEY middleware. `/api/zara-price` kept as a back-compat
+// alias (handler defaults retailer="zara").
+{
+  const retailHandler = createRetailHandler({ puppeteer, buildLaunchOptions });
+  app.post('/api/retail-price', retailHandler);
+  app.post('/api/zara-price', retailHandler);
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
