@@ -1,33 +1,32 @@
 diff --git a/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js b/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
-index 630d930..5bb278b 100644
+index 730371d..7f99036 100644
 --- a/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
 +++ b/node_modules/israeli-bank-scrapers/lib/scrapers/discount.js
 @@ -85,11 +85,27 @@ async function navigateOrErrorLabel(page) {
    } catch (e) {
      await (0, _elementsInteractions.waitUntilElementFound)(page, '#general-error', false, 100);
    }
-+  // PATCH (retail3 SPA timing): Discount's new portal is a single-page app. After
++  // PATCH (retail3 SPA timing): Discount's portal is a single-page app. After
 +  // login the browser shows a loading shell (green spinner) and only LATER sets
-+  // the client-side hash route (#/MY_ACCOUNT_HOMEPAGE) — WITHOUT a classic
++  // the client-side hash route (#/MY_ACCOUNT_HOMEPAGE) WITHOUT a classic
 +  // navigation event, so waitForNavigation above either resolves on the shell or
-+  // REJECTS (no nav fired). Either way the base scraper then read window.location
-+  // mid-load and matched nothing → UNKNOWN_ERROR. Run this settle-wait
++  // REJECTS (no nav fired). Either way the base scraper then reads window.location
++  // mid-load and matches nothing -> UNKNOWN_ERROR. Run this settle-wait
 +  // UNCONDITIONALLY (outside the try/catch) so it works whichever branch ran:
 +  // wait (client-side) until the URL reaches a known account/login/password page
-+  // before the result check. Bounded + safe — on timeout we fall through with
++  // before the result check. Bounded + safe -- on timeout we fall through with
 +  // whatever the current URL is, preserving original behavior.
 +  try {
 +    await (0, _navigation.waitForUrl)(page, /\/apollo\/retail\d*\/|\/login\/#\/|masterPage\.html#\//, 15000, true);
 +  } catch (settleErr) {
-+    // URL never settled to a known state within the timeout — fall through and
++    // URL never settled to a known state within the timeout -- fall through and
 +    // let getKeyByValue classify whatever the current URL is.
 +  }
  }
  function getPossibleLoginResults() {
    const urls = {};
--  urls[_baseScraperWithBrowser.LoginResults.Success] = [`${BASE_URL}/apollo/retail/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail2/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail2/`];
+   urls[_baseScraperWithBrowser.LoginResults.Success] = [`${BASE_URL}/apollo/retail/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail2/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail2/`, `${BASE_URL}/apollo/retail3/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail3/`];
 -  urls[_baseScraperWithBrowser.LoginResults.InvalidPassword] = [`${BASE_URL}/apollo/core/templates/lobby/masterPage.html#/LOGIN_PAGE`];
-+  urls[_baseScraperWithBrowser.LoginResults.Success] = [`${BASE_URL}/apollo/retail/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail2/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail2/`, `${BASE_URL}/apollo/retail3/#/MY_ACCOUNT_HOMEPAGE`, `${BASE_URL}/apollo/retail3/`];
 +  urls[_baseScraperWithBrowser.LoginResults.InvalidPassword] = [`${BASE_URL}/apollo/core/templates/lobby/masterPage.html#/LOGIN_PAGE`, `${BASE_URL}/login/#/LOGIN_PAGE`];
    urls[_baseScraperWithBrowser.LoginResults.ChangePassword] = [`${BASE_URL}/apollo/core/templates/lobby/masterPage.html#/PWD_RENEW`];
    return urls;
